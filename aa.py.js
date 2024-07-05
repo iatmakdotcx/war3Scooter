@@ -11,22 +11,6 @@ frida -p (ps War3).id -l aa.py.js
 		
 */
 
-function xzUnit() {
-	//japi.DzGetSelectedLeaderUnit()
-	return "local g = jcom.CreateGroup();\r\n" +
-		//"jcom.GroupEnumUnitsOfPlayer(g, jcom.Player(0), null);"+
-		"jcom.SyncSelections();jcom.GroupEnumUnitsSelected(g, jcom.Player(0), null);" +
-		"local unit1 =jcom.FirstOfGroup(g); \r\n";
-
-}
-
-var commonJb = {
-	"wd": "jcom.SetUnitInvulnerable(japi.DzGetSelectedLeaderUnit(),true); \r\n",
-	"wd-": "jcom.SetUnitInvulnerable(japi.DzGetSelectedLeaderUnit(),false); \r\n",
-	"1": "jcom.KillUnit(japi.DzGetSelectedLeaderUnit());",
-	".": "jcom.SetUnitPositionLoc(japi.DzGetSelectedLeaderUnit(),jcom.Location(japi.DzGetMouseTerrainX(), japi.DzGetMouseTerrainY()))",
-}
-
 const VirtualAlloc = new NativeFunction(Module.findExportByName(null,"VirtualAlloc"), 'pointer', ['pointer', 'size_t', 'uint32', 'uint32']);
 
 function readExeVersion(filePath) {
@@ -334,40 +318,9 @@ const jass =
 	},
 	_createTriggerCallMiddle() 
 	{
-		const newTrigger = new NativeCallback((p1,p2,p3,p4,p5,p6,p7) => {
-			console.log("p1:"+p1+",p2:"+p2+",p3:"+p3+",p4:"+p4+",p5:"+p5+",p6:"+p6+",p7:"+p7)
-			//const triggerActionId = p2
-			//if(triggerActionId >= 0x8F000000) 
-			//{
-			//	that.commonCallBack(triggerActionId.add(-0x8F000000))
-			//}
-			//else if(triggerActionId >= 0x80000000) 
-			//{
-			//	console.log("aaaaaaaaaaaa????????????????????")
-			//	that._callback(triggerActionId)
-			//}
-			return 1
-		}, 'int', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer'], "fastcall")
-		
-		const newTrigger2 = new NativeCallback((p1,p2) => {
-			console.log("p1:"+p1+",p2:"+p2)
-			//const triggerActionId = p2
-			//if(triggerActionId >= 0x8F000000) 
-			//{
-			//	that.commonCallBack(triggerActionId.add(-0x8F000000))
-			//}
-			//else if(triggerActionId >= 0x80000000) 
-			//{
-			//	console.log("aaaaaaaaaaaa????????????????????")
-			//	that._callback(triggerActionId)
-			//}
-			return 1
-		}, 'int', ['pointer', 'pointer'], "fastcall")
-		 
+
 		const mmoo = VirtualAlloc(NULL, 0x1000, 0x1000, 4)
-		//const mmoo = ptr(0x183b0000)
-		console.log("MMoo:"+mmoo)
-		
+
 		const xx = new X86Writer(mmoo)
 		xx.putCallAddress(mmoo.add(0x10))
 		xx.putMovRegU32('eax', 1)
@@ -567,11 +520,6 @@ const jass =
 	call(name, ...p1)
 	{
 		this.init()
-		if(!this._call_cache)
-		{
-			console.error("Jass 未初始化。先调用init")
-			return
-		}
 		let callerObj = this._call_cache[name]
 		if(!callerObj)
 		{
