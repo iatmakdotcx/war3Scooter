@@ -12,6 +12,7 @@ frida -p (ps War3).id -l aa.py.js
 */
 
 const VirtualAlloc = new NativeFunction(Module.findExportByName(null,"VirtualAlloc"), 'pointer', ['pointer', 'size_t', 'uint32', 'uint32']);
+var GameDll = Module.findBaseAddress('Game.dll')
 
 function readExeVersion(filePath) {
     const kernel32 = Module.load('kernel32.dll');
@@ -88,6 +89,18 @@ function hex2float(num) {
 	const mantissa = 1 + ((num & 0x7fffff) / 0x7fffff);
 	return (sign * mantissa * Math.pow(2, exponent)).toFixed(2);
 }
+function code2hex(code) {
+	return (code.charCodeAt(0)<<24) +
+	(code.charCodeAt(1)<<16) +
+	(code.charCodeAt(2)<<8) +
+	code.charCodeAt(3)
+	//return Memory.allocAnsiString(code).readU32()
+}
+function hex2code(hex) {
+	var mmoo = Memory.alloc(0x40)
+	mmoo.writeU32(hex)
+	return mmoo.readCString(4).split('').reverse().join('')
+}
 function float2Hex(num) {
 	const view = new DataView(new ArrayBuffer(4))
 	view.setFloat32(0, num)
@@ -104,6 +117,7 @@ function createfloat(ff) {
 	return mmoo
 }
 function createString(ss) {
+	if(ss==null ||ss==undefined) return ptr(0)
 	var mmoo = Memory.alloc(0x200 + ss.length)
 	mmoo.add(8).writePointer(mmoo.add(0x10))
 	mmoo.add(0xc).writeU32(1)
@@ -111,6 +125,16 @@ function createString(ss) {
 	mmoo.add(0x100).writeUtf8String(ss)
 	return mmoo
 }
+function disasm(p)
+{
+	for(let i=0;i<50;i++)
+	{
+		const line = Instruction.parse(p)
+		console.log(p + " "+line.mnemonic +" "+line.opStr)
+		p = line.next
+	}
+}
+
 const OPCODE_VARIABLE = {
 	NOTHING: 0,        // "nothing"
 	UNKNOWN: 1,        // "unknown"
@@ -296,11 +320,7 @@ const jass =
 		this._JassApiTable=[]
 		//加载函数列表
 		this._JassApiTable = this.loadJassApisFromMemory()
-		//let ffile = new File("D:\\Game\\__MQ\\kk_funs.txt","r")
-		//this._JassApiTable = JSON.parse(ffile.readText())
-		//ffile.close()
 		//加入jassApi
-		
 		for(let iobj of this._JassApiTable) this[iobj.name] = (...arg)=> this.call(iobj.name, ...arg)
 	},
 	init()
@@ -361,12 +381,12 @@ const jass =
 		xx2.putPushReg("esi")
 		xx2.putPushReg("edi")
 		//Game.dll+7E2FA5 - 8B F2                 - mov esi,edx
-		xx2.putJmpAddress(Module.findBaseAddress('Game.dll').add(0x7E2FA5))
+		xx2.putJmpAddress(GameDll.add(0x7E2FA5))
 		xx2.flush()
 
 		Memory.protect(mmoo,0x1000, 'rwx')
 		// Game.dll+7E2FA0
-		Memory.patchCode(Module.findBaseAddress('Game.dll').add(0x7E2FA0), 5, code => {
+		Memory.patchCode(GameDll.add(0x7E2FA0), 5, code => {
 		  const cw = new X86Writer(code);
 		  cw.putJmpAddress(mmoo.add(0x60));
 		  cw.flush()
@@ -446,6 +466,7 @@ const jass =
 		{
 			return i5.add(0x90).readPointer().add(4*idx).readPointer();
 		}else{
+			console.log("*[warning]static jass_vm_t used...")
 			return Module.findBaseAddress('War3Plugin.dll').add(0x193FA4).readPointer();
 		}
 	},
@@ -496,26 +517,33 @@ const jass =
 			const addr = itembase.add(0x1c).readPointer()
 			const param_num = itembase.add(0x20).readPointer()
 			const param = itembase.add(0x24).readPointer().readCString()
-			
-			const module = Process.getModuleByAddress(addr)
-			const offset = addr.add(-module.base)
+			 
+			const module = Process.findModuleByAddress(addr)
+			const offset = module?addr.add(-module.base):0
 			//console.log(i + ",addr:" + addr + ",name:" + name + "\t" + param+"\t"+offset)
 			allfuncs.push({
 				name:name,
-				dll:module.name,
+				dll:module?module.name:"UNKNOWN",
 				offset:offset,
 				param:param,
-				param_num:param_num
+				param_num:param_num,
+				addr:addr
 			})
-			const hasn = itembase.add(0x14).readU32()
+			const hasn = itembase.add(0x14).readU32() 
 			if (hasn > 0x80000000) break;
 			itembase = ptr(hasn)
 		}
-		//var ox = new File("D:\\Game\\__MQ\\kk_funs.txt", "w")
-		//ox.write(JSON.stringify(allfuncs))
-		//ox.flush()
-		//ox.close()
 		return allfuncs
+	},
+	getFunc(name)
+	{
+		const f1 = this._JassApiTable.filter(x=>(x.name==name) || (x.dll.replace(".dll",'')+"."+x.name)==name)
+		if(f1.length == 0)
+		{
+			console.error("JassApi not found : " + name)
+			return
+		}
+		return f1[0]
 	},
 	call(name, ...p1)
 	{
@@ -523,7 +551,6 @@ const jass =
 		let callerObj = this._call_cache[name]
 		if(!callerObj)
 		{
-			//GetLocalPlayer
 			const f1 = this._JassApiTable.filter(x=>(x.name==name) || (x.dll.replace(".dll",'')+"."+x.name)==name)
 			if(f1.length == 0)
 			{
@@ -535,7 +562,6 @@ const jass =
 				console.error("JassApi multiple implement found : " + name +"\r\n"+JSON.stringify(f1))
 				return
 			}
-			//console.log(JSON.stringify(f1))
 			const funcdefine = f1[0]
 			const par_in = []
 			let par_out = ""
@@ -567,15 +593,6 @@ const jass =
 					par_in.push(a)
 				}
 			}
-			const dll = Process.findModuleByName(funcdefine.dll);
-			if(!dll)
-			{
-				console.error(funcdefine.dll + " not loaded! " + name)
-				return
-			}
-			const funcaddr = Process.findModuleByName(funcdefine.dll).base.add(funcdefine.offset)
-			//console.log("funcadd:"+funcaddr)
-			
 			var par_out_2 = this.JassCallTypeConvert(par_out)
 			const par_in_2 = [...par_in]
 			for(let ii=0;ii<par_in_2.length;ii++)
@@ -584,7 +601,7 @@ const jass =
 			}
 			//console.log("in => " + JSON.stringify(par_in_2))
 			//console.log("out => " + par_out)
-			const caller = new NativeFunction(funcaddr, par_out_2, par_in_2, 'stdcall');
+			const caller = new NativeFunction(funcdefine.addr, par_out_2, par_in_2, 'stdcall');
 			callerObj = {
 				params:par_in,
 				retule:par_out,
@@ -681,19 +698,14 @@ const jass =
 	dumpGlobalVariable(vmIdx = 1) {
 		const global_table = this.jass_vm_t(vmIdx).add(0x285C).readPointer()
 		let itembase = global_table.add(0xC).readPointer()
-
 		for (let i = 0; i < 10000; i++) {
 			const name = itembase.add(0x14).readPointer().readCString()
 			const array_ = itembase.add(0x18).readU32()
 			const type_ = itembase.add(0x1c).readU32()
 			const value_ = itembase.add(0x20).readPointer()
 			
-			if(type_==8)
+			//if(type_==8)
 			{
-				//  exe print(jg.yaojingXGN__sjbez)
-				//  exe print(jg.yaojingGG__wjid)
-				//  exe local wjid =jg.yaojingGG__wjid print(wjid)
-				//  exe print(jg.bj_FORCE_PLAYER[3])
 				console.log(itembase+":"+name +"\t"+array_+"\t" +"\t"+type_ +"\t"+value_ +"\t")
 			}
 			
@@ -716,6 +728,56 @@ const jass =
 			if (hasn > 0x80000000) break;
 			itembase = ptr(hasn)
 		}
+	},
+	getAllItems()
+	{
+		const item_table = GameDll.add(0xBE6114)
+		const mask = item_table.add(0x24).readPointer()
+		const itembase = item_table.add(0x1C).readPointer().add(8)
+		//console.log(mask, itembase)
+		const allitems = []
+		for(let im=0;im<mask;im++)
+		{
+			let slot = itembase.add(0xC * im).readPointer()
+			for(let i=0;i<10;i++)
+			{
+				if(slot>0x7fffffff || slot<0x10000)
+				{
+					break
+				}
+				//const hash = slot.add(0x4)
+				const aitemobj = {
+					addr: slot,
+					id : slot.add(0x1c).readCString(4),
+					type : slot.add(0xA8).readU32(),
+					name : ""
+				}
+				if(slot.add(0x2c).readPointer()!=0)
+				{
+					aitemobj.name = slot.add(0x2c).readPointer().readPointer().readUtf8String()
+				}
+				if(slot.add(0x26c).readPointer()!=0)
+				{
+					aitemobj.usertip = slot.add(0x26c).readPointer().readPointer().readUtf8String()
+				}
+				if(slot.add(0x260).readPointer()!=0)
+				{
+					aitemobj.tip = slot.add(0x260).readPointer().readPointer().readUtf8String()
+				}
+				//模型文件
+				/*
+				if(slot.add(0x24c).readPointer()!=0)
+				{
+					aitemobj.art = slot.add(0x24c).readPointer().readPointer().readUtf8String()
+				}
+				*/
+				if(aitemobj.name)
+					allitems.push(aitemobj)
+				slot = slot.add(0xc).readPointer()
+			}
+		}
+		//console.log(JSON.stringify(allitems))
+		return allitems
 	}
 	
 }
@@ -780,7 +842,7 @@ const jasslua =
 					that.onluaload(chunkname, luadata)
 					if (!luadata.startsWith("return ((require'jass.slk')")) {
 						//这里dump所有执行的lua
-						//console.log(luadata)
+						console.log(luadata)
 						//send(chunkname, data.readByteArray(len))
 					}
 				},
@@ -929,66 +991,117 @@ if(jass_dll)
 jasslua.hook("luacore.dll")
 
 
+const GameUI = {
+	mouseX:0,
+	mouseY:0,
+	onKeyPress(key){
+		//非常规键值
+		console.log("pressKey:"+key)
+	},
+	init()
+	{
+		const that = this
+		that.GetAsyncKeyState = new NativeFunction(Module.findExportByName(null,"GetAsyncKeyState"), 'int', ['int']),
+		that.IsControlKeyPressed = new NativeFunction(GameDll.add(0x576f0), 'pointer', ['int'],'thiscall')
+		
+		Interceptor.attach(GameDll.add(0x364c40), {
+			onEnter: function (args) {
+				that.mouseX = args[2].readU32()
+				that.mouseY = args[2].add(4).readU32()
+			}
+		})
+		Interceptor.attach(GameDll.add(0x3520F0), {
+			onEnter: function (args) {
+				const key = args[0].add(0x10).readU32()
+				const t2 = jass.CreateTimer()
+				jass.TimerStart(t2, 0, false, ()=>{
+					that.onKeyPress(key)
+					
+					jass.DestroyTimer(t2)
+				})
+			}
+		})
+	},
+	getMouseX(){
+		return hex2float(this.mouseX)
+	},
+	getMouseY(){
+		return hex2float(this.mouseY)
+	},
+	isShift(){
+		return this.GetAsyncKeyState(16)!=0
+	},
+	isCtrl(){
+		return this.GetAsyncKeyState(17)!=0
+	},
+	isAlt(){
+		return this.GetAsyncKeyState(18)!=0
+	},	
+	IS_CHATTING(){
+		return GameDll.add(0xbdaa14).readU32()==1
+	}
+}
+GameUI.init()
+
 /////////////////////////////////////////////////////////////////////
 //////////////////////////////扩展///////////////////////////////////
 /////////////////////////////////////////////////////////////////////
 
 
-//输入不了中文（函数中替换掉
-function iptReplace(aa) {
-	var ss = aa.readUtf8String()
-	if(ss == '000'){
-		aa.writeUtf8String("吃饭睡觉打豆豆")
-	}else if(ss == '001'){
-		aa.writeUtf8String("天天RPG")
-	}else if(ss == 'mm'){
-		aa.writeUtf8String("墨眉")
-	}
-}
-function chatMsgReplace() {
-	const Game_dll = Module.findBaseAddress('Game.dll')
-	const getInputText = Game_dll.add(0x399630);
-
-	Interceptor.attach(getInputText, {
-		onEnter: function (args) {
-		},
-		onLeave: function (retval) {
-			iptReplace(retval)
+Interceptor.attach(GameDll.add(0x399630), {
+	onEnter: function (args) {
+	},
+	onLeave: function (retval) {
+		var ss = retval.readUtf8String()
+		//输入不了中文（函数中替换掉
+		if(ss == '?'){
+			msghandle()
 		}
-	})
-}
-chatMsgReplace() 
+		if(ss == '000'){
+			retval.writeUtf8String("吃饭睡觉打豆豆")
+		}else if(ss == '001'){
+			retval.writeUtf8String("天天RPG")
+		}else if(ss == 'mm'){
+			retval.writeUtf8String("墨眉")
+		}
+	}
+}) 
 
+function getSelectUnit()
+{
+	let player = jass.GetTriggerPlayer()
+	if(player==0)player = jass.Player(0)
+	
+	const g = jass.CreateGroup()
+	jass.GroupEnumUnitsSelected(g, player, null);
+	const unit1 = jass.FirstOfGroup(g)
+	jass.DestroyGroup(g)
+	return unit1
+}
 jass.commonCallBack = (x)=>
 {
-	console.log("call commonCallBack:" + x)
+	//console.log("call commonCallBack:" + x)
 	
 	if(x == 2)
 	{
 		const player = jass.call('GetTriggerPlayer')
-		const msg = jass.GetEventPlayerChatString()
-		jass.call('DisplayTimedTextToPlayer',player,0,0,7,'|cffffcc00【金色】|r - |cffff0000【红色】|r - |cff339966【绿色】|r - |cff00ccff【蓝色】|r - |cffc0c0c0【灰色】|r - |cffff00ff【紫色】|r'+"-->"+msg)
+		const msgpp = jass.GetEventPlayerChatString().split(" ")
+		const msg = msgpp[0]
+		//jass.call('DisplayTimedTextToPlayer',player,0,0,7,'|cffffcc00【金色】|r - |cffff0000【红色】|r - |cff339966【墨绿】|r - |cff00ccff【蓝色】|r - |cffc0c0c0【灰色】|r - |cffff00ff【紫色】|r - |Cff0af30a【绿】|r'+"-->"+msg)
 		if(msg == ".")
 		{
 			//传送选中角色到鼠标位置
-			jass.SetUnitPositionLoc(jass.DzGetSelectedLeaderUnit(),jass.Location(jass.DzGetMouseTerrainX(), jass.DzGetMouseTerrainY()))
+			jass.SetUnitPositionLoc(getSelectUnit(),jass.Location(GameUI.getMouseX(), GameUI.getMouseY()))
 		}
 		else if(msg == "1")
 		{
 			//杀死选中对象
-			//jass.KillUnit(jass.DzGetSelectedLeaderUnit());
-			
-			const g = jass.CreateGroup()
-			jass.GroupEnumUnitsSelected(g, jass.GetTriggerPlayer(), null);
-			const unit1 = jass.FirstOfGroup(g)
-			jass.DestroyGroup(g)
-			
-			jass.KillUnit(unit1)
+			jass.KillUnit(getSelectUnit())
 		}
 		else if(msg == "11")
 		{
 			//杀死选中对象
-			const target = jass.DzGetSelectedLeaderUnit()
+			const target = getSelectUnit()
 			
 			const playerUnits = jass.CreateGroup()
 			jass.GroupEnumUnitsOfPlayer(playerUnits, jass.GetTriggerPlayer(), null)
@@ -1002,7 +1115,8 @@ jass.commonCallBack = (x)=>
 			
 			const ATTACK_TYPE_CHAOS = jass.getGlobalVariable("ATTACK_TYPE_CHAOS").value
 			const DAMAGE_TYPE_ENHANCED = jass.getGlobalVariable("DAMAGE_TYPE_ENHANCED").value
-			jass.UnitDamageTarget(actor, target, maxhp, false, true, ATTACK_TYPE_CHAOS, DAMAGE_TYPE_ENHANCED, null)
+			
+			jass.UnitDamageTarget(actor, target, maxhp, true, true, ATTACK_TYPE_CHAOS, DAMAGE_TYPE_ENHANCED, null)
 		}
 		else if(msg == "12")
 		{
@@ -1018,14 +1132,14 @@ jass.commonCallBack = (x)=>
 			const DAMAGE_TYPE_ENHANCED = jass.getGlobalVariable("DAMAGE_TYPE_ENHANCED").value
 			
 			const targetGroup = jass.CreateGroup()
-			jass.GroupEnumUnitsInRange(targetGroup, jass.DzGetMouseTerrainX(), jass.DzGetMouseTerrainY(), 1000, null)
+			jass.GroupEnumUnitsInRange(targetGroup, GameUI.getMouseX(), GameUI.getMouseY(), 1000, null)
 			jass.ForGroup(targetGroup, ()=>{
 				const curUnit = jass.GetEnumUnit()
 				if(jass.IsUnitEnemy(curUnit,player))
 				{
-					console.log(" kill >> :" + jass.GetUnitName(curUnit))
+					//console.log(" kill >> :" + jass.GetUnitName(curUnit))
 					const maxhp = jass.GetUnitState(curUnit, UNIT_STATE_MAX_LIFE)
-					jass.UnitDamageTarget(actor, curUnit, maxhp, false, true, ATTACK_TYPE_CHAOS, DAMAGE_TYPE_ENHANCED, null)
+					jass.UnitDamageTarget(actor, curUnit, maxhp, true, true, ATTACK_TYPE_CHAOS, DAMAGE_TYPE_ENHANCED, null)
 				}
 			})
 			jass.DestroyGroup(targetGroup)
@@ -1034,162 +1148,216 @@ jass.commonCallBack = (x)=>
 		else if(msg == "wd")
 		{
 			//选中对象无敌
-			jass.SetUnitInvulnerable(jass.DzGetSelectedLeaderUnit(),true); 
+			jass.SetUnitInvulnerable(getSelectUnit(),true); 
 		}
 		else if(msg == "wd-")
 		{
 			//选中对象取消无敌
-			jass.SetUnitInvulnerable(jass.DzGetSelectedLeaderUnit(),false);
+			jass.SetUnitInvulnerable(getSelectUnit(),false);
+		}
+		else if(msg == "aa1")
+		{
+			Trigger_aa1 = jass.CreateTrigger()
+			jass.TriggerRegisterTimerEvent(Trigger_aa1, 1, true)
+			jass.TriggerAddAction(Trigger_aa1, 3)  
+		}
+		else if(msg == "aa2")
+		{
+			jass.DestroyTrigger(Trigger_aa1)
+		}
+		else if(msg == "give"){
+			if(msgpp.length<2){
+				jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffff0000指令错误 【give id】 |r')
+			}else{
+				const cnt = msgpp[2]||1
+				for(let i=0;i<cnt;i++)
+				{
+					jass.UnitAddItemById(getSelectUnit(),code2hex(msgpp[1]));
+				}
+			}
 		}
 	}
+	else if(x == 3)
+	{
+		Trigger_aa1 = jass.GetTriggeringTrigger()
+		//杀死选中对象1000范围内的怪
+		const player = jass.Player(0)
+		
+		const playerUnits = jass.CreateGroup()
+		jass.GroupEnumUnitsOfPlayer(playerUnits, player, null)
+		let actor = jass.FirstOfGroup(playerUnits)
+		//console.log("UnitName:" + jass.GetUnitName(actor))
+		jass.DestroyGroup(playerUnits)
+		
+		const UNIT_STATE_MAX_LIFE = jass.getGlobalVariable("UNIT_STATE_MAX_LIFE").value
+		const ATTACK_TYPE_CHAOS = jass.getGlobalVariable("ATTACK_TYPE_SIEGE").value
+		const DAMAGE_TYPE_ENHANCED = jass.getGlobalVariable("DAMAGE_TYPE_UNKNOWN").value
+		
+		const targetGroup = jass.CreateGroup()
+		jass.GroupEnumUnitsInRange(targetGroup, jass.GetUnitX(actor), jass.GetUnitY(actor), 2000, null)
+		jass.ForGroup(targetGroup, ()=>{
+			const curUnit = jass.GetEnumUnit()
+			if(jass.IsUnitEnemy(curUnit,player))
+			{
+				let  maxhp = jass.GetUnitState(curUnit, UNIT_STATE_MAX_LIFE)
+				const hp = jass.GetUnitState(curUnit, jass.getGlobalVariable("UNIT_STATE_LIFE").value)
+				//console.log(" kill >> :" + jass.GetUnitName(curUnit)+", HP:"+hp+"/"+maxhp)
+
+				jass.UnitDamageTarget(actor, curUnit, maxhp, true, true, ATTACK_TYPE_CHAOS, DAMAGE_TYPE_ENHANCED, null)
+			}
+		})
+		jass.DestroyGroup(targetGroup)
+		
+	}
+}
+var spawntype=1;
+var spawnId;
+var spawnOwn;
+var Trigger_aa1;
+
+GameUI.onKeyPress=(key)=>{
+	//console.log("aaaaaaaaa>"+key,GameUI.isCtrl(),GameUI.isShift(),GameUI.isAlt())
+	if(key == 67)
+	{
+		// press C
+		if(GameUI.isCtrl())
+		{
+			//ctrl
+			const unit1 = getSelectUnit()
+			if(unit1.toInt32()!=0)
+			{
+				spawnOwn = jass.GetOwningPlayer(unit1)
+				spawnId = jass.GetUnitTypeId(unit1)
+				spawntype = 1
+				const name = jass.GetUnitName(unit1)
+				jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|C0000ff00 unit copied, '+spawnOwn+', '+hex2code(spawnId)+','+name+'|r')
+				return;
+			}
+			//选择光标位置的物品
+			jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffff0000 '+GameUI.getMouseX()+","+GameUI.getMouseY()+'|r')
+			let itemname;
+			const mx = GameUI.getMouseX()
+			const my = GameUI.getMouseY()
+			jass.EnumItemsInRect(jass.GetWorldBounds(), null,()=>{
+				const item = jass.GetEnumItem()
+			
+				const x = jass.GetItemX(item)
+				const y = jass.GetItemY(item)
+				if(Math.abs(mx-x)<50 && Math.abs(my-y)<50)
+				{
+					spawnId = jass.GetItemTypeId(item)
+					itemname = jass.GetItemName(item)
+				}
+				
+			})
+			
+			if(itemname){
+				spawntype = 2			
+				jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'item copied, '+hex2code(spawnId)+','+itemname)
+			}
+			else{
+				jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffff0000 必须选择一个单位。 |r')
+			}
+		}
+	}
+	else if(key == 86)
+	{
+		// press V
+		if(GameUI.isCtrl())
+		{
+			//ctrl
+			if(spawntype==1)
+			{
+				if(spawnId && spawnOwn)
+				{
+					jass.CreateUnit(spawnOwn,spawnId, GameUI.getMouseX(), GameUI.getMouseY(),0)
+				}else{
+					jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffff0000 先使用Ctrl+C复制单位。 |r')
+				}
+			}else if(spawntype==2){
+				if(spawnId)
+				{
+					jass.CreateItem(spawnId, GameUI.getMouseX(), GameUI.getMouseY());
+				} 
+			}else{
+				
+			}
+		}
+	}
+	
+}
+function resetDamageFunc()
+{
+	var oldDmg = GameDll.add(0x67DC40)
+	var funTable = GameDll.add(0xA4A824)
+	Memory.protect(funTable, 4, 'rwx');
+	funTable.writePointer(oldDmg)
+	Memory.protect(funTable, 4, 'r-x');
+}
+
+function getFlag(offset)
+{
+	return GameDll.add(0x50).add(offset||0).readU8()
+}
+function setFlag(offset, v)
+{	
+	var p = GameDll.add(0x50).add(offset||0)
+	Memory.protect(p, 4, 'rwx');
+	p.writeU8(v)
+	Memory.protect(p, 4, 'r-x');
+}
+
+function showcheatMsg()
+{	
+	const t2 = jass.CreateTimer()
+	jass.TimerStart(t2, 0, false, ()=>{
+		//jass.call('DisplayTimedTextToPlayer',jass.Player(0),0,0,7,'|cffffcc00【金色】|r - |cffff0000【红色】|r - |cff339966【绿色】|r - |cff00ccff【蓝色】|r - |cffc0c0c0【灰色】|r - |cffff00ff【紫色】|r'+"-->")
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|Cff0af30a作弊器初始化完成|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|Cff0af30a指令：|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00?|r      |Cff0af30a显示此消息|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00.|r      |Cff0af30a将选中对象移动到鼠标光标位置。|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc0011|r    |Cff0af30a杀死选中对象。|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc0012|r    |Cff0af30a杀死鼠标位置1000范围内的敌人。|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00aa1|r  |Cff0af30a持续秒杀2000范围内的敌人。|r       |cffffcc00aa2|r  |Cff0af30a停止秒杀。|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00wd|r  |Cff0af30a选中对象无敌。|r       |cffffcc00wd-|r  |Cff0af30a取消无敌。|r')
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00give id|r  |Cff0af30a给予物品。|r')
+		
+		jass.DisplayTimedTextToPlayer(jass.Player(0),0,0,7,'|cffffcc00[Ctrl+C]|r  |Cff0af30a复制选中的单位。|r   |cffffcc00[Ctrl+V]|r  |Cff0af30a召唤复制的单位。|r')
+		
+	})
 }
 
 function msghandle() {
+	if(getFlag(0)==1)
+	{
+		showcheatMsg()
+		return;
+	}
+	setFlag(0,1)
+	//resetDamageFunc()
+	
 	const t1 = jass.CreateTrigger()
 	jass.TriggerRegisterPlayerChatEvent(t1, jass.Player(0), '', false)
-	jass.TriggerAddAction(t1, 2)    
-}
-//进游戏后执行
-//msghandle()
-
-
-/////////////////////////////////////////////////////////////////////
-/////////////////////////以下测试代码////////////////////////////////
-/////////////////////////////////////////////////////////////////////
- 
-
-
-function Hook_Jass_load_save_Variant() {
-	console.error("==========Hook_JassFuncs=============")
-
+	jass.TriggerRegisterPlayerChatEvent(t1, jass.Player(1), '', false)
+	jass.TriggerRegisterPlayerChatEvent(t1, jass.Player(2), '', false)
+	jass.TriggerRegisterPlayerChatEvent(t1, jass.Player(3), '', false)
+	jass.TriggerAddAction(t1, 2)
 	
-	return;
-	Interceptor.attach(SaveInteger, {
-		onEnter: function (args) {
-			//if(args[1]!=0x1 && args[1]!=0x2 && args[1]!=0x1039c0 && args[2]!=0xcfde6c76 && args[2]!=0xece825e7)
-			//{
-			//console.log("SaveInteger ok:=====>"+args[0]+","+args[1]+","+args[2]+","+args[3]);
-			//}
-			//if(args[2]==0xa3098ae2)
-			//{
-			//	args[3]=ptr(0x1000)
-			//}
-
-		},
-		onLeave: function (retval) {
-		}
-	});
-
-	Interceptor.attach(LoadInteger, {
-		onEnter: function (args) {
-			//if(args[2]==0xDFB448FB)
-			//console.log("LoadInteger ok:=====>"+args[0]+","+args[1]+","+args[2]+","+args[3]);
-
-		},
-		onLeave: function (retval) {
-		}
-	});
-
-	Interceptor.attach(SaveReal, {
-		onEnter: function (args) {
-	
-		},
-		onLeave: function (retval) {
-		}
-	});
-	Interceptor.attach(LoadStr, {
-		onEnter: function (args) {
-			//console.log("LoadStr:=====>"+args[0]);
-			
-		},
-		onLeave: function (retval) {
-			//console.log("???retval:"+retval.toString());
-			//console.log('Context  : ' + JSON.stringify(this.context));
-		}
-	});
+	showcheatMsg()
+	console.log("cheat commands loaded.")
 }
-//Hook_Jass_load_save_Variant()
 
 
-var War3Plugin = {
-	RequestExtra__:0x9EEA0,
-	DzAPI_Map_SaveServerValue:0x8be90,
-	DzAPI_Map_GetServerValue:0x8beb0
-}
-function hook_RequestExtra()
-{
-	var War3PluginDll = Module.findBaseAddress('War3Plugin.dll')
-	if(!War3PluginDll)
-	{
-		console.error("War3Plugin.dll不存在，跳过RequestExtraIntegerData")
-		return
+Interceptor.attach(Module.findBaseAddress('Game.dll').add(0x7E2F60), {
+	onEnter: function (args) {
+		const jname = this.context.edx.readCString()
+		console.log("call——, p0:"+jname)
+		console.log(Module.findBaseAddress('Game.dll').add(0xBEF99C).readByteArray(0x40))
+		console.log(Module.findBaseAddress('Game.dll').add(0xBEF99C).readPointer().readByteArray(0x40))
+		if(jname=="main")
+		{
+			msghandle()
+		}
 	}
-/*	
-	const RequestExtraIntegerData = War3PluginDll.add(War3Plugin.RequestExtra__)
-	console.log("RequestExtraIntegerData:"+RequestExtraIntegerData)
-	Interceptor.attach(RequestExtraIntegerData, {
-		onEnter: function (args) {
-			
-			this.inparam = []
-			for(let i=0;i<8;i++) this.inparam.push(args[i])
-			return
-			console.log("p0:"+args[0]+",p1:"+args[1]+",p2:"+args[2]+",p3:"+args[3]+",p4:"+args[4]+",p5:"+args[5]+",p6:"+args[6]+",p7:"+args[7])
-			
-			const keyname = jass.from_string(args[2])
-			const value = args[3].add(8).readPointer().add(0x1c).readPointer().readCString()
-			//if(args[0]==38)DzKeys.add(":I"+keyname)
-			console.log("RequestExtraIntegerData:" + args[0] + ">>" + keyname + "=" + value)
-		},
-		onLeave: function (retval) {
-			const args = this.inparam
-			const keyname = jass.from_string(args[2])
-			const value = jass.from_string(args[3])
-			if(args[0] == 4)
-			{
-				console.log("RequestExtraIntegerData: Set int "+ keyname+"="+value +" >>>"+retval+":"+jass.getStringById(retval))
-			}
-			else if(args[0] == 5)
-			{
-				console.log("RequestExtraIntegerData: Get int "+ keyname+"="+value +" >>>"+retval+":"+jass.getStringById(retval))
-			}
-			else 
-			{
-				console.log("p0:"+args[0]+",p1:"+args[1]+",p2:"+args[2]+",p3:"+args[3]+",p4:"+args[4]+",p5:"+args[5]+",p6:"+args[6]+",p7:"+args[7])
-				console.log("RequestExtraIntegerData:" + args[0] + ">>" + keyname + "=" + value + " >>>"+retval+":"+jass.getStringById(retval))
-			}
-		}
-	});
-*/
+})
 
-	const DzAPI_Map_SaveServerValue = War3PluginDll.add(War3Plugin.DzAPI_Map_SaveServerValue)
-	console.log("DzAPI_Map_SaveServerValue:"+DzAPI_Map_SaveServerValue)
-	Interceptor.attach(DzAPI_Map_SaveServerValue, {
-		onEnter: function (args) {
-			//(Hplayer;SS)B
-			//console.log("p0:"+args[0]+",p1:"+args[1]+",p2:"+args[2])
-			const keyname = jass.from_string(args[1])
-			const value = jass.from_string(args[2])
-			
-			console.log("DzAPI_Map_SaveServerValue: "+args[0]+" "+ keyname+"="+value)
-		},
-		onLeave: function (retval) {
-			
-		}
-	})	
-	const DzAPI_Map_GetServerValue = War3PluginDll.add(War3Plugin.DzAPI_Map_GetServerValue)
-	console.log("DzAPI_Map_GetServerValue:"+DzAPI_Map_GetServerValue)
-	Interceptor.attach(DzAPI_Map_GetServerValue, {
-		onEnter: function (args) {
-			this.p0 = args[0]
-			//(Hplayer;S)S
-			//console.log("p0:"+args[0]+",p1:"+args[1]+",p2:"+args[2])
-			this.keyname = jass.from_string(args[1])
-		},
-		onLeave: function (retval) {
-			const value = jass.getStringById(retval)
-			console.log("DzAPI_Map_GetServerValue: "+this.p0+" "+ this.keyname+"="+value)
-		}
-	})
-	
-}
-hook_RequestExtra()
